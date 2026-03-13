@@ -1,4 +1,4 @@
-import * as FileSystem from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as MediaLibrary from "expo-media-library";
 import { useEffect, useRef, useState } from "react";
@@ -12,7 +12,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  View
+  View,
 } from "react-native";
 import { captureRef } from "react-native-view-shot";
 import {
@@ -35,17 +35,14 @@ export default function HomeScreen() {
   const [facingMode, setFacingMode] = useState("user");
   const [detectionEnabled, setDetectionEnabled] = useState(false);
   const [capturedImages, setCapturedImages] = useState([]);
-  const [showCaptureButton, setShowCaptureButton] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const [selectedImage, setSelectedImage] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [captureTimeout, setCaptureTimeout] = useState(null);
   const [lastPreviewImage, setLastPreviewImage] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // OFFSET METHOD
   const [blinkOffset, setBlinkOffset] = useState(0);
-  // ✅ Real blink count (প্রতি ২ ব্লিংক ইভেন্ট = ১ টি ব্লিঙ্ক)
   const [displayCount, setDisplayCount] = useState(0);
 
   const videoTrack = stream?.getVideoTracks()[0] ?? null;
@@ -73,7 +70,7 @@ export default function HomeScreen() {
 
   // Blink detection hook
   const {
-    blinkCount, // library থেকে পাওয়া raw blink count (প্রতি চোখের জন্য আলাদা)
+    blinkCount,
     enable: enableBlinkDetection,
     disable: disableBlinkDetection,
   } = useBlinkDetection(videoTrack, {
@@ -82,30 +79,21 @@ export default function HomeScreen() {
     captureOnBlink: false,
     onBlink: (event) => {
       const now = Date.now();
-      if (now - lastBlinkTime.current < 300) return; // 300ms ডিবাউন্স
+      if (now - lastBlinkTime.current < 300) return;
       lastBlinkTime.current = now;
-
-      console.log("👁️ Single eye blink detected!");
-
-      if (isCapturing) {
-        captureImage();
-      }
+      console.log("👁️ Blink detected!");
     },
   });
 
-  // ✅ সিম্পল ব্লিংক কাউন্ট ক্যালকুলেশন - ২ ব্লিংক ইভেন্ট = ১ টি ব্লিঙ্ক
+  // Calculate real blink count (2 events = 1 blink)
   useEffect(() => {
-    // raw blinkCount কে ২ দিয়ে ভাগ করে পূর্ণসংখ্যা বের করা
     const rawCount = Math.max(0, blinkCount - blinkOffset);
-    const realBlinkCount = Math.floor(rawCount / 2); // প্রতি ২ ইভেন্ট = ১ ব্লিঙ্ক
-
+    const realBlinkCount = Math.floor(rawCount / 2);
     setDisplayCount(realBlinkCount);
 
-    // ২ টি সম্পূর্ণ ব্লিঙ্ক = ৪ টি ইভেন্ট
-    if (realBlinkCount >= 2) {
-      setShowCaptureButton(true);
-    } else {
-      setShowCaptureButton(false);
+    if (realBlinkCount >= 4 && !isProcessing) {
+      console.log("🎯 4 blinks reached! Auto-capturing...");
+      autoCapture();
     }
   }, [blinkCount, blinkOffset]);
 
@@ -129,18 +117,139 @@ export default function HomeScreen() {
     if (detectionResult) {
       const hasFaces =
         detectionResult.faces && detectionResult.faces.length > 0;
-
       if (faceDetected && !hasFaces) {
         resetBlinkState();
       }
-
       setFaceDetected(hasFaces);
     }
   }, [detectionResult]);
 
+  // Auto capture function
+  const autoCapture = async () => {
+    if (!rtcViewRef.current || !isCameraActive || isProcessing) return;
+
+    setIsProcessing(true);
+
+    try {
+      console.log("📸 Auto-capturing image...");
+
+      const base64Image = await captureRef(rtcViewRef, {
+        format: "png",
+        quality: 0.9,
+        result: "base64",
+      });
+
+      await processAndSaveImage(base64Image);
+      setBlinkOffset(blinkCount);
+    } catch (error) {
+      console.log("❌ Auto-capture error:", error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const processAndSaveImage = async (base64Image) => {
+    try {
+      console.log("💾 Processing image...");
+      console.log("Base64 length:", base64Image.length);
+
+      // 🔥 সম্পূর্ণ Base64 স্ট্রিং লগ করুন (ছোট ইমেজ হলে)
+      console.log("=================================");
+      console.log("FULL BASE64 STRING:");
+      console.log(base64Image);
+      console.log("=================================");
+
+      // অথবা প্রথম 500 এবং শেষ 500 ক্যারেক্টার দেখান (বড় ইমেজ হলে)
+      console.log("BASE64 START (first 500 chars):");
+      console.log(base64Image.substring(0, 500));
+      console.log("BASE64 END (last 500 chars):");
+      console.log(base64Image.substring(base64Image.length - 500));
+
+      // Base64 ফরম্যাট চেক করুন
+      console.log(
+        "Contains 'base64,' prefix:",
+        base64Image.includes("base64,"),
+      );
+      console.log(
+        "Starts with 'data:image':",
+        base64Image.startsWith("data:image"),
+      );
+
+      // 1. Base64 ক্লিন করুন (শুধু ডিবাগের জন্য)
+      // let base64String = base64Image;
+      if (base64Image.includes("base64,")) {
+        base64String = base64Image.split("base64,")[1];
+        console.log("After split - length:", base64String.length);
+        console.log("After split - first 100:", base64String.substring(0, 100));
+      }
+      console.log("💾 Processing image...");
+      console.log("Base64 length:", base64Image.length);
+
+      // 1. Base64 ক্লিন করুন
+      let base64String = base64Image;
+      if (base64Image.includes("base64,")) {
+        base64String = base64Image.split("base64,")[1];
+      }
+
+      // 2. ক্যাশে ডিরেক্টরি তৈরি
+      const tempDir = new Directory(Paths.cache, "temp_images");
+      await tempDir.create({ idempotent: true });
+
+      // 3. টেম্প ফাইল তৈরি (PNG)
+      const tempFile = new File(tempDir, `temp_${Date.now()}.png`); // 🔥 .png
+      await tempFile.create();
+
+      // 4. Base64 ডাটা লেখা
+      const bytes = Uint8Array.from(atob(base64String), (c) => c.charCodeAt(0));
+      await tempFile.write(bytes);
+
+      // 5. ইমেজ ম্যানিপুলেশন - PNG হিসেবে রাখুন
+      const manipResult = await ImageManipulator.manipulateAsync(
+        tempFile.uri,
+        [{ resize: { width: 640 } }],
+        { compress: 1, format: ImageManipulator.SaveFormat.PNG }, // 🔥 PNG
+      );
+
+      // 6. স্থায়ী ডিরেক্টরি তৈরি
+      const faceDir = new Directory(Paths.document, "captured_faces");
+      await faceDir.create({ idempotent: true });
+
+      // 7. ফাইনাল ফাইল তৈরি (PNG)
+      const finalFile = new File(faceDir, `face_${Date.now()}.png`); // 🔥 .png
+      const manipFile = new File(manipResult.uri);
+      await manipFile.copy(finalFile);
+
+      // 8. টেম্প ফাইল ডিলিট
+      await tempFile.delete();
+      await manipFile.delete();
+
+      // 9. ফাইল exist কিনা চেক করুন
+      const fileInfo = await finalFile.info();
+      console.log("📁 File exists:", fileInfo.exists);
+      console.log("📁 File size:", fileInfo.size);
+
+      if (fileInfo.exists) {
+        const newImage = {
+          id: Date.now(),
+          uri: finalFile.uri,
+          timestamp: new Date().toLocaleTimeString(),
+          size: fileInfo.size,
+        };
+
+        setCapturedImages((prev) => [newImage, ...prev].slice(0, 20));
+        setLastPreviewImage(newImage);
+
+        console.log("✅ Image saved successfully!");
+        Alert.alert("✅ Captured!", "Image saved successfully");
+      }
+    } catch (error) {
+      console.log("❌ Save error:", error);
+      Alert.alert("Error", "Failed to save image: " + error.message);
+    }
+  };
+
   const resetBlinkState = () => {
-    setBlinkOffset(blinkCount); // অফসেট raw blinkCount এ সেট করছি
-    setShowCaptureButton(false);
+    setBlinkOffset(blinkCount);
   };
 
   const startWebRTCCamera = async () => {
@@ -162,8 +271,6 @@ export default function HomeScreen() {
       setBlinkOffset(0);
       setDisplayCount(0);
       setFaceDetected(false);
-      setShowCaptureButton(false);
-      setIsCapturing(false);
       lastBlinkTime.current = 0;
     } catch (error) {
       Alert.alert("Camera Error", error.message);
@@ -172,11 +279,6 @@ export default function HomeScreen() {
 
   const stopWebRTCCamera = () => {
     setDetectionEnabled(false);
-    setIsCapturing(false);
-    if (captureTimeout) {
-      clearTimeout(captureTimeout);
-      setCaptureTimeout(null);
-    }
     disableFaceDetection();
     disableBlinkDetection();
 
@@ -186,96 +288,6 @@ export default function HomeScreen() {
       setStream(null);
     }
     setIsCameraActive(false);
-  };
-
-  const captureImage = async () => {
-    if (!rtcViewRef.current || !isCapturing) return;
-
-    try {
-      console.log("📸 Capturing image...");
-
-      const base64Image = await captureRef(rtcViewRef, {
-        format: "jpg",
-        quality: 0.9,
-        result: "base64",
-      });
-
-      await processAndSaveImage(base64Image);
-    } catch (error) {
-      console.log("❌ Capture error:", error);
-      Alert.alert("Error", "Failed to capture image");
-      setIsCapturing(false);
-    }
-  };
-
-  const processAndSaveImage = async (base64Image) => {
-    try {
-      let base64String = base64Image;
-      if (base64Image.includes("base64,")) {
-        base64String = base64Image.split("base64,")[1];
-      }
-
-      const tempUri = FileSystem.cacheDirectory + `temp_${Date.now()}.jpg`;
-      await FileSystem.writeAsStringAsync(tempUri, base64String, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-
-      const manipResult = await ImageManipulator.manipulateAsync(
-        tempUri,
-        [{ resize: { width: 640 } }],
-        { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG },
-      );
-
-      const filename = `face_${Date.now()}.jpg`;
-      const fileUri = FileSystem.documentDirectory + filename;
-
-      await FileSystem.copyAsync({
-        from: manipResult.uri,
-        to: fileUri,
-      });
-
-      await FileSystem.deleteAsync(tempUri);
-      if (manipResult.uri !== tempUri) {
-        await FileSystem.deleteAsync(manipResult.uri);
-      }
-
-      const newImage = {
-        id: Date.now(),
-        uri: fileUri,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-
-      setCapturedImages((prev) => [newImage, ...prev].slice(0, 20));
-      setLastPreviewImage(newImage);
-
-      setIsCapturing(false);
-      if (captureTimeout) {
-        clearTimeout(captureTimeout);
-        setCaptureTimeout(null);
-      }
-
-      resetBlinkState();
-    } catch (error) {
-      console.log("❌ Save error:", error);
-      setIsCapturing(false);
-    }
-  };
-
-  const startCaptureMode = () => {
-    if (!stream || isCapturing) return;
-
-    console.log("📸 Starting capture mode...");
-    setIsCapturing(true);
-
-    const timeout = setTimeout(() => {
-      if (isCapturing) {
-        console.log("⏰ Capture timeout");
-        setIsCapturing(false);
-        Alert.alert("Timeout", "No blink detected. Please try again.");
-      }
-    }, 5000);
-
-    setCaptureTimeout(timeout);
   };
 
   const switchCamera = () => {
@@ -297,9 +309,9 @@ export default function HomeScreen() {
   const deleteImage = (imageId) => {
     const image = capturedImages.find((img) => img.id === imageId);
     if (image?.uri) {
-      FileSystem.deleteAsync(image.uri).catch((err) =>
-        console.log("Error deleting file:", err),
-      );
+      new File(image.uri)
+        .delete()
+        .catch((err) => console.log("Error deleting file:", err));
     }
 
     setCapturedImages((prev) => prev.filter((img) => img.id !== imageId));
@@ -313,7 +325,6 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" translucent />
 
-      {/* Main Camera - Full Screen */}
       <View style={styles.cameraContainer}>
         {isCameraActive && stream ? (
           <RTCView
@@ -329,7 +340,6 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Top Status Overlay */}
         <View style={styles.topOverlay}>
           <View style={styles.statsRow}>
             <View style={styles.statBadge}>
@@ -338,8 +348,7 @@ export default function HomeScreen() {
               </Text>
             </View>
             <View style={styles.statBadge}>
-              {/* ✅ এখন real blink count দেখাচ্ছে */}
-              <Text style={styles.statBadgeText}>👁️ {displayCount}</Text>
+              <Text style={styles.statBadgeText}>👁️ {displayCount}/4</Text>
             </View>
           </View>
 
@@ -362,36 +371,23 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Capture Button - Shows when 2 REAL blinks detected */}
-        {showCaptureButton && isCameraActive && !isCapturing && (
-          <TouchableOpacity
-            style={styles.captureTriggerButton}
-            onPress={startCaptureMode}
-          >
-            <Text style={styles.captureTriggerText}>📸</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Capture Mode Indicator */}
-        {isCapturing && (
-          <View style={styles.captureModeOverlay}>
-            <Text style={styles.captureModeText}>BLINK TO CAPTURE</Text>
-            <TouchableOpacity
-              style={styles.cancelCaptureButton}
-              onPress={() => {
-                setIsCapturing(false);
-                if (captureTimeout) {
-                  clearTimeout(captureTimeout);
-                  setCaptureTimeout(null);
-                }
-              }}
-            >
-              <Text style={styles.cancelCaptureText}>✕</Text>
-            </TouchableOpacity>
+        {isCameraActive && displayCount > 0 && displayCount < 4 && (
+          <View style={styles.progressOverlay}>
+            <View
+              style={[
+                styles.progressBar,
+                { width: `${(displayCount / 4) * 100}%` },
+              ]}
+            />
           </View>
         )}
 
-        {/* Bottom Controls */}
+        {isProcessing && (
+          <View style={styles.processingOverlay}>
+            <Text style={styles.processingText}>📸 CAPTURING...</Text>
+          </View>
+        )}
+
         <View style={styles.bottomControls}>
           <TouchableOpacity
             style={styles.powerButton}
@@ -403,21 +399,24 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Left Bottom Preview Box */}
         {lastPreviewImage && (
           <TouchableOpacity
             style={styles.previewBox}
             onPress={() => viewImage(lastPreviewImage)}
           >
             <Image
-              source={{ uri: lastPreviewImage.uri }}
+              source={{ uri: lastPreviewImage.uri + `?t=${Date.now()}` }}
               style={styles.previewImage}
+              resizeMode="cover"
+              onLoad={() => console.log("✅ Preview loaded")}
+              onError={(error) =>
+                console.log("❌ Preview error:", error.nativeEvent.error)
+              }
             />
           </TouchableOpacity>
         )}
       </View>
 
-      {/* Image Preview Modal */}
       <Modal
         visible={modalVisible}
         transparent
@@ -481,7 +480,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "bold",
   },
-  // Top Overlay
   topOverlay: {
     position: "absolute",
     top: 50,
@@ -526,68 +524,38 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 20,
   },
-  // Capture Trigger Button
-  captureTriggerButton: {
+  progressOverlay: {
     position: "absolute",
     bottom: 100,
-    alignSelf: "center",
-    width: 70,
-    height: 70,
-    borderRadius: 35,
+    left: 50,
+    right: 50,
+    height: 4,
+    backgroundColor: "rgba(255,255,255,0.3)",
+    borderRadius: 2,
+  },
+  progressBar: {
+    height: 4,
     backgroundColor: "#4CAF50",
-    justifyContent: "center",
-    alignItems: "center",
-    borderWidth: 3,
-    borderColor: "#fff",
-    elevation: 5,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
+    borderRadius: 2,
   },
-  captureTriggerText: {
-    color: "#fff",
-    fontSize: 30,
-  },
-  // Capture Mode Overlay
-  captureModeOverlay: {
+  processingOverlay: {
     position: "absolute",
     top: 120,
     left: 0,
     right: 0,
     alignItems: "center",
   },
-  captureModeText: {
-    backgroundColor: "#FF4444",
+  processingText: {
+    backgroundColor: "#4CAF50",
     color: "#fff",
     paddingHorizontal: 20,
     paddingVertical: 8,
     borderRadius: 20,
     fontWeight: "bold",
     fontSize: 14,
-    overflow: "hidden",
     borderWidth: 1,
     borderColor: "#fff",
   },
-  cancelCaptureButton: {
-    position: "absolute",
-    top: 50,
-    right: 20,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(255,68,68,0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#fff",
-  },
-  cancelCaptureText: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "bold",
-  },
-  // Bottom Controls
   bottomControls: {
     position: "absolute",
     bottom: 30,
@@ -609,7 +577,6 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 24,
   },
-  // Left Bottom Preview Box
   previewBox: {
     position: "absolute",
     bottom: 30,
@@ -626,7 +593,6 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
   },
-  // Modal Styles
   modalContainer: {
     flex: 1,
     justifyContent: "center",
