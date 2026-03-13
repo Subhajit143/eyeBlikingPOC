@@ -1,5 +1,4 @@
 import { Directory, File, Paths } from "expo-file-system";
-import * as ImageManipulator from "expo-image-manipulator";
 import * as MediaLibrary from "expo-media-library";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -14,7 +13,6 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { captureRef } from "react-native-view-shot";
 import {
   configureWebRTC,
   mediaDevices,
@@ -39,7 +37,6 @@ export default function HomeScreen() {
   const [selectedImage, setSelectedImage] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [lastPreviewImage, setLastPreviewImage] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
 
   // OFFSET METHOD
   const [blinkOffset, setBlinkOffset] = useState(0);
@@ -47,7 +44,11 @@ export default function HomeScreen() {
 
   const videoTrack = stream?.getVideoTracks()[0] ?? null;
   const lastBlinkTime = useRef(0);
-  const rtcViewRef = useRef(null);
+  const videoRef = useRef(null);
+  const capturePendingRef = useRef(false);
+  const lastCapturedAtRef = useRef(0);
+  const preCaptureImageRef = useRef(null);
+  const preCaptureTimerRef = useRef(null);
 
   // Request media permissions
   useEffect(() => {
@@ -71,31 +72,104 @@ export default function HomeScreen() {
   // Blink detection hook
   const {
     blinkCount,
+    recentBlinks,
     enable: enableBlinkDetection,
     disable: disableBlinkDetection,
   } = useBlinkDetection(videoTrack, {
     enabled: detectionEnabled,
     blinkThreshold: 0.3,
-    captureOnBlink: false,
+    captureOnBlink: true,
+    cropToFace: true,
+    imageQuality: 0.9,
+    maxImageWidth: 740,
     onBlink: (event) => {
       const now = Date.now();
       if (now - lastBlinkTime.current < 300) return;
       lastBlinkTime.current = now;
       console.log("👁️ Blink detected!");
+
+      if (event.faceImage) {
+        preCaptureImageRef.current = event.faceImage;
+        console.log("💾 Image saved for later capture");
+      }
     },
   });
 
-  // Calculate real blink count (2 events = 1 blink)
+  // Calculate real blink count
   useEffect(() => {
     const rawCount = Math.max(0, blinkCount - blinkOffset);
     const realBlinkCount = Math.floor(rawCount / 2);
     setDisplayCount(realBlinkCount);
+  }, [blinkCount, blinkOffset]);
 
-    if (realBlinkCount >= 4 && !isProcessing) {
-      console.log("🎯 4 blinks reached! Auto-capturing...");
-      autoCapture();
+  // capture logic two way
+  useEffect(() => {
+    const rawCount = Math.max(0, blinkCount - blinkOffset);
+    const realBlinkCount = Math.floor(rawCount / 2);
+
+    if (realBlinkCount >= 4 && !capturePendingRef.current) {
+      console.log("🎯 4 blinks reached! Will capture...");
+      capturePendingRef.current = true;
+
+      // Clear previous timer
+      if (preCaptureTimerRef.current) {
+        clearTimeout(preCaptureTimerRef.current);
+      }
+
+      // 🔥 Timer set
+      preCaptureTimerRef.current = setTimeout(() => {
+        // First check pre capture image
+        if (preCaptureImageRef.current) {
+          console.log("📸 Capturing from pre-capture image!");
+          saveBase64Image(preCaptureImageRef.current);
+          resetCapture();
+        }
+        // Find Recent blinks
+        else if (recentBlinks.length > 0) {
+          for (let i = recentBlinks.length - 1; i >= 0; i--) {
+            const blink = recentBlinks[i];
+            if (
+              blink.faceImage &&
+              blink.timestamp > lastCapturedAtRef.current
+            ) {
+              console.log("📸 Capturing from recentBlinks!");
+              saveBase64Image(blink.faceImage);
+              lastCapturedAtRef.current = blink.timestamp;
+              resetCapture();
+              break;
+            }
+          }
+        } else {
+          console.log("⚠️ No image available");
+          capturePendingRef.current = false;
+        }
+      }, 300);
     }
   }, [blinkCount, blinkOffset]);
+
+  useEffect(() => {
+    if (capturePendingRef.current && recentBlinks.length > 0) {
+      for (let i = recentBlinks.length - 1; i >= 0; i--) {
+        const blink = recentBlinks[i];
+        if (blink.faceImage && blink.timestamp > lastCapturedAtRef.current) {
+          console.log("📸 Capturing from recentBlinks (immediate)!");
+          saveBase64Image(blink.faceImage);
+          lastCapturedAtRef.current = blink.timestamp;
+          resetCapture();
+          break;
+        }
+      }
+    }
+  }, [recentBlinks]);
+
+  const resetCapture = () => {
+    capturePendingRef.current = false;
+    preCaptureImageRef.current = null;
+    if (preCaptureTimerRef.current) {
+      clearTimeout(preCaptureTimerRef.current);
+    }
+    setBlinkOffset(blinkCount);
+  };
 
   // Auto-enable detection
   useEffect(() => {
@@ -124,132 +198,55 @@ export default function HomeScreen() {
     }
   }, [detectionResult]);
 
-  // Auto capture function
-  const autoCapture = async () => {
-    if (!rtcViewRef.current || !isCameraActive || isProcessing) return;
-
-    setIsProcessing(true);
-
-    try {
-      console.log("📸 Auto-capturing image...");
-
-      const base64Image = await captureRef(rtcViewRef, {
-        format: "png",
-        quality: 0.9,
-        result: "base64",
-      });
-
-      await processAndSaveImage(base64Image);
-      setBlinkOffset(blinkCount);
-    } catch (error) {
-      console.log("❌ Auto-capture error:", error);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const processAndSaveImage = async (base64Image) => {
-    try {
-      console.log("💾 Processing image...");
-      console.log("Base64 length:", base64Image.length);
-
-      // 🔥 সম্পূর্ণ Base64 স্ট্রিং লগ করুন (ছোট ইমেজ হলে)
-      console.log("=================================");
-      console.log("FULL BASE64 STRING:");
-      console.log(base64Image);
-      console.log("=================================");
-
-      // অথবা প্রথম 500 এবং শেষ 500 ক্যারেক্টার দেখান (বড় ইমেজ হলে)
-      console.log("BASE64 START (first 500 chars):");
-      console.log(base64Image.substring(0, 500));
-      console.log("BASE64 END (last 500 chars):");
-      console.log(base64Image.substring(base64Image.length - 500));
-
-      // Base64 ফরম্যাট চেক করুন
-      console.log(
-        "Contains 'base64,' prefix:",
-        base64Image.includes("base64,"),
-      );
-      console.log(
-        "Starts with 'data:image':",
-        base64Image.startsWith("data:image"),
-      );
-
-      // 1. Base64 ক্লিন করুন (শুধু ডিবাগের জন্য)
-      // let base64String = base64Image;
-      if (base64Image.includes("base64,")) {
-        base64String = base64Image.split("base64,")[1];
-        console.log("After split - length:", base64String.length);
-        console.log("After split - first 100:", base64String.substring(0, 100));
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      if (preCaptureTimerRef.current) {
+        clearTimeout(preCaptureTimerRef.current);
       }
-      console.log("💾 Processing image...");
-      console.log("Base64 length:", base64Image.length);
+    };
+  }, []);
 
-      // 1. Base64 ক্লিন করুন
-      let base64String = base64Image;
-      if (base64Image.includes("base64,")) {
-        base64String = base64Image.split("base64,")[1];
-      }
+  const saveBase64Image = async (base64String) => {
+    try {
+      console.log("💾 Saving image, length:", base64String.length);
 
-      // 2. ক্যাশে ডিরেক্টরি তৈরি
-      const tempDir = new Directory(Paths.cache, "temp_images");
-      await tempDir.create({ idempotent: true });
-
-      // 3. টেম্প ফাইল তৈরি (PNG)
-      const tempFile = new File(tempDir, `temp_${Date.now()}.png`); // 🔥 .png
-      await tempFile.create();
-
-      // 4. Base64 ডাটা লেখা
-      const bytes = Uint8Array.from(atob(base64String), (c) => c.charCodeAt(0));
-      await tempFile.write(bytes);
-
-      // 5. ইমেজ ম্যানিপুলেশন - PNG হিসেবে রাখুন
-      const manipResult = await ImageManipulator.manipulateAsync(
-        tempFile.uri,
-        [{ resize: { width: 640 } }],
-        { compress: 1, format: ImageManipulator.SaveFormat.PNG }, // 🔥 PNG
-      );
-
-      // 6. স্থায়ী ডিরেক্টরি তৈরি
       const faceDir = new Directory(Paths.document, "captured_faces");
       await faceDir.create({ idempotent: true });
 
-      // 7. ফাইনাল ফাইল তৈরি (PNG)
-      const finalFile = new File(faceDir, `face_${Date.now()}.png`); // 🔥 .png
-      const manipFile = new File(manipResult.uri);
-      await manipFile.copy(finalFile);
+      const filename = `face_${Date.now()}.png`;
+      const file = new File(faceDir, filename);
+      await file.create();
 
-      // 8. টেম্প ফাইল ডিলিট
-      await tempFile.delete();
-      await manipFile.delete();
+      const bytes = Uint8Array.from(atob(base64String), (c) => c.charCodeAt(0));
+      await file.write(bytes);
 
-      // 9. ফাইল exist কিনা চেক করুন
-      const fileInfo = await finalFile.info();
-      console.log("📁 File exists:", fileInfo.exists);
-      console.log("📁 File size:", fileInfo.size);
+      const fileInfo = await file.info();
 
-      if (fileInfo.exists) {
-        const newImage = {
-          id: Date.now(),
-          uri: finalFile.uri,
-          timestamp: new Date().toLocaleTimeString(),
-          size: fileInfo.size,
-        };
+      const newImage = {
+        id: Date.now(),
+        uri: file.uri,
+        base64: base64String,
+        timestamp: new Date().toLocaleTimeString(),
+        size: fileInfo.size,
+      };
 
-        setCapturedImages((prev) => [newImage, ...prev].slice(0, 20));
-        setLastPreviewImage(newImage);
+      setCapturedImages((prev) => [newImage, ...prev].slice(0, 20));
+      setLastPreviewImage(newImage);
 
-        console.log("✅ Image saved successfully!");
-        Alert.alert("✅ Captured!", "Image saved successfully");
-      }
+      console.log("✅ Image saved!");
     } catch (error) {
       console.log("❌ Save error:", error);
-      Alert.alert("Error", "Failed to save image: " + error.message);
     }
   };
 
   const resetBlinkState = () => {
     setBlinkOffset(blinkCount);
+    capturePendingRef.current = false;
+    if (preCaptureTimerRef.current) {
+      clearTimeout(preCaptureTimerRef.current);
+    }
+    preCaptureImageRef.current = null;
   };
 
   const startWebRTCCamera = async () => {
@@ -271,7 +268,13 @@ export default function HomeScreen() {
       setBlinkOffset(0);
       setDisplayCount(0);
       setFaceDetected(false);
+      capturePendingRef.current = false;
+      lastCapturedAtRef.current = 0;
       lastBlinkTime.current = 0;
+      preCaptureImageRef.current = null;
+      if (preCaptureTimerRef.current) {
+        clearTimeout(preCaptureTimerRef.current);
+      }
     } catch (error) {
       Alert.alert("Camera Error", error.message);
     }
@@ -306,12 +309,14 @@ export default function HomeScreen() {
     setModalVisible(true);
   };
 
-  const deleteImage = (imageId) => {
+  const deleteImage = async (imageId) => {
     const image = capturedImages.find((img) => img.id === imageId);
     if (image?.uri) {
-      new File(image.uri)
-        .delete()
-        .catch((err) => console.log("Error deleting file:", err));
+      try {
+        await new File(image.uri).delete();
+      } catch (err) {
+        console.log("Error deleting file:", err);
+      }
     }
 
     setCapturedImages((prev) => prev.filter((img) => img.id !== imageId));
@@ -328,7 +333,7 @@ export default function HomeScreen() {
       <View style={styles.cameraContainer}>
         {isCameraActive && stream ? (
           <RTCView
-            ref={rtcViewRef}
+            ref={videoRef}
             streamURL={stream.toURL()}
             style={styles.rtcView}
             objectFit="cover"
@@ -371,20 +376,10 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {isCameraActive && displayCount > 0 && displayCount < 4 && (
-          <View style={styles.progressOverlay}>
-            <View
-              style={[
-                styles.progressBar,
-                { width: `${(displayCount / 4) * 100}%` },
-              ]}
-            />
-          </View>
-        )}
-
-        {isProcessing && (
-          <View style={styles.processingOverlay}>
-            <Text style={styles.processingText}>📸 CAPTURING...</Text>
+        {/* Ready to capture indicator */}
+        {displayCount >= 4 && !capturePendingRef.current && (
+          <View style={styles.readyOverlay}>
+            <Text style={styles.readyText}>📸 READY TO CAPTURE</Text>
           </View>
         )}
 
@@ -405,13 +400,10 @@ export default function HomeScreen() {
             onPress={() => viewImage(lastPreviewImage)}
           >
             <Image
-              source={{ uri: lastPreviewImage.uri + `?t=${Date.now()}` }}
+              source={{
+                uri: `data:image/png;base64,${lastPreviewImage.base64}`,
+              }}
               style={styles.previewImage}
-              resizeMode="cover"
-              onLoad={() => console.log("✅ Preview loaded")}
-              onError={(error) =>
-                console.log("❌ Preview error:", error.nativeEvent.error)
-              }
             />
           </TouchableOpacity>
         )}
@@ -427,7 +419,9 @@ export default function HomeScreen() {
             {selectedImage && (
               <>
                 <Image
-                  source={{ uri: selectedImage.uri }}
+                  source={{
+                    uri: `data:image/png;base64,${selectedImage.base64}`,
+                  }}
                   style={styles.modalImage}
                 />
                 <Text style={styles.modalTime}>{selectedImage.timestamp}</Text>
@@ -455,31 +449,16 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#000",
-  },
-  cameraContainer: {
-    flex: 1,
-    backgroundColor: "#000",
-    position: "relative",
-  },
-  rtcView: {
-    flex: 1,
-    width: width,
-    height: height,
-  },
+  container: { flex: 1, backgroundColor: "#000" },
+  cameraContainer: { flex: 1, backgroundColor: "#000", position: "relative" },
+  rtcView: { flex: 1, width: width, height: height },
   placeholder: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "#1a1a1a",
   },
-  placeholderText: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "bold",
-  },
+  placeholderText: { color: "#fff", fontSize: 18, fontWeight: "bold" },
   topOverlay: {
     position: "absolute",
     top: 50,
@@ -489,10 +468,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  statsRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
+  statsRow: { flexDirection: "row", gap: 10 },
   statBadge: {
     backgroundColor: "rgba(0,0,0,0.6)",
     paddingHorizontal: 12,
@@ -501,15 +477,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#4CAF50",
   },
-  statBadgeText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "bold",
-  },
-  cameraControls: {
-    flexDirection: "row",
-    gap: 10,
-  },
+  statBadgeText: { color: "#fff", fontSize: 14, fontWeight: "bold" },
+  cameraControls: { flexDirection: "row", gap: 10 },
   iconButton: {
     width: 40,
     height: 40,
@@ -520,32 +489,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#fff",
   },
-  iconButtonText: {
-    color: "#fff",
-    fontSize: 20,
-  },
-  progressOverlay: {
-    position: "absolute",
-    bottom: 100,
-    left: 50,
-    right: 50,
-    height: 4,
-    backgroundColor: "rgba(255,255,255,0.3)",
-    borderRadius: 2,
-  },
-  progressBar: {
-    height: 4,
-    backgroundColor: "#4CAF50",
-    borderRadius: 2,
-  },
-  processingOverlay: {
+  iconButtonText: { color: "#fff", fontSize: 20 },
+  readyOverlay: {
     position: "absolute",
     top: 120,
     left: 0,
     right: 0,
     alignItems: "center",
   },
-  processingText: {
+  readyText: {
     backgroundColor: "#4CAF50",
     color: "#fff",
     paddingHorizontal: 20,
@@ -573,10 +525,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: "#fff",
   },
-  powerButtonText: {
-    color: "#fff",
-    fontSize: 24,
-  },
+  powerButtonText: { color: "#fff", fontSize: 24 },
   previewBox: {
     position: "absolute",
     bottom: 30,
@@ -589,10 +538,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#1a1a1a",
     overflow: "hidden",
   },
-  previewImage: {
-    width: "100%",
-    height: "100%",
-  },
+  previewImage: { width: "100%", height: "100%" },
   modalContainer: {
     flex: 1,
     justifyContent: "center",
@@ -614,11 +560,7 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: "#4CAF50",
   },
-  modalTime: {
-    color: "#888",
-    fontSize: 14,
-    marginBottom: 20,
-  },
+  modalTime: { color: "#888", fontSize: 14, marginBottom: 20 },
   modalButtons: {
     flexDirection: "row",
     justifyContent: "space-around",
@@ -638,9 +580,5 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginLeft: 10,
   },
-  modalButtonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "bold",
-  },
+  modalButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
 });
