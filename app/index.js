@@ -102,7 +102,6 @@ export default function HomeScreen() {
     setDisplayCount(realBlinkCount);
   }, [blinkCount, blinkOffset]);
 
-  // capture logic two way
   useEffect(() => {
     const rawCount = Math.max(0, blinkCount - blinkOffset);
     const realBlinkCount = Math.floor(rawCount / 2);
@@ -116,16 +115,10 @@ export default function HomeScreen() {
         clearTimeout(preCaptureTimerRef.current);
       }
 
-      // 🔥 Timer set
+      // 🔥 Timer set to 1.5 seconds
       preCaptureTimerRef.current = setTimeout(() => {
-        // First check pre capture image
-        if (preCaptureImageRef.current) {
-          console.log("📸 Capturing from pre-capture image!");
-          saveBase64Image(preCaptureImageRef.current);
-          resetCapture();
-        }
         // Find Recent blinks
-        else if (recentBlinks.length > 0) {
+        if (recentBlinks.length > 0) {
           for (let i = recentBlinks.length - 1; i >= 0; i--) {
             const blink = recentBlinks[i];
             if (
@@ -143,7 +136,7 @@ export default function HomeScreen() {
           console.log("⚠️ No image available");
           capturePendingRef.current = false;
         }
-      }, 300);
+      }, 3500); // Changed from 300 to 1500ms (1.5 seconds)
     }
   }, [blinkCount, blinkOffset]);
 
